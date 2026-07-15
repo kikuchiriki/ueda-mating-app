@@ -210,6 +210,7 @@ def normalize_eartag(x):
 # ══════════════════════════════════════════════════════════════════
 #  データ読み込み・整形
 # ══════════════════════════════════════════════════════════════════
+
 def read_csv_auto(raw_bytes):
     for enc in ["utf-8-sig", "cp932", "utf-8"]:
         try:
@@ -426,6 +427,7 @@ st.markdown(
     f"box-shadow:0 1px 4px rgba(0,0,0,.07)'>"
     f"<span style='font-size:1.5rem;font-weight:700'>植田牧場 メイティング・繁殖管理アプリ</span>"
     f"</div>", unsafe_allow_html=True)
+
 if insem_df is None:
     st.info("サイドバーから授精記録CSVを保存してください。")
     st.stop()
@@ -441,7 +443,7 @@ with TABS[0]:
     query = st.text_input("牛番号を入力してください", value="", placeholder="例：3620")
     query = query.strip()
 
-   if query:
+    if query:
         if query not in cow_master:
             st.warning(f"牛番号「{query}」の授精記録が見つかりません。番号をご確認ください。")
         else:
@@ -556,6 +558,7 @@ with TABS[0]:
                 disp_hist.columns = ["授精日", "品種", "方法", "結果", "技術者"]
                 disp_hist["授精日"] = disp_hist["授精日"].dt.strftime("%Y/%m/%d")
                 st.dataframe(disp_hist.reset_index(drop=True), use_container_width=True)
+
 # ══════════════════════════════════════════════════════════════════
 #  TAB 2: 授精成績分析（受胎率）
 # ══════════════════════════════════════════════════════════════════
