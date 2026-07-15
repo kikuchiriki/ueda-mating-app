@@ -441,20 +441,89 @@ with TABS[0]:
     query = st.text_input("牛番号を入力してください", value="", placeholder="例：3620")
     query = query.strip()
 
-    if query:
+   if query:
         if query not in cow_master:
             st.warning(f"牛番号「{query}」の授精記録が見つかりません。番号をご確認ください。")
         else:
             entry = cow_master[query]
             hist = insem_df[insem_df["ID"] == query].sort_values("_date", ascending=False)
 
-            # ---- 基本情報 ----
             bdat = hist["_bdat"].dropna().iloc[0] if hist["_bdat"].notna().any() else None
             age_months = None
             if bdat is not None:
                 delta = relativedelta(date.today(), bdat.date())
                 age_months = delta.years * 12 + delta.months
 
+            # ---- 遺伝的順位 ----
+            st.markdown("#### 遺伝的順位（牛群内パーセンタイル）")
+            grow = entry["genomic_row"]
+            if grow is None:
+                st.info("この牛のゲノム情報が見つかりません（ゲノム検査未実施、または紐付け未確認の可能性があります）。")
+            else:
+                always_show = ["DWP$", "NM$", "TPI"]
+                gc1, gc2, gc3 = st.columns(3)
+                for col, trait in zip([gc1, gc2, gc3], always_show):
+                    if trait in trait_cols:
+                        val = grow.get(trait)
+                        pct = grow.get(f"pct__{trait}")
+                        col.metric(trait, f"{val:.0f}" if pd.notna(val) else "-",
+                                   f"上位{100-pct:.0f}% (順位{pct:.0f}%)" if pd.notna(pct) else "")
+
+                other_traits = [t for t in trait_cols if t not in always_show]
+                sel_trait = st.selectbox("その他の形質を選択", other_traits, key="trait_select_1")
+                if sel_trait:
+                    val = grow.get(sel_trait)
+                    pct = grow.get(f"pct__{sel_trait}")
+                    st.metric(sel_trait, f"{val:.2f}" if pd.notna(val) else "-",
+                              f"牛群内順位 {pct:.0f}%" if pd.notna(pct) else "")
+
+            st.markdown("---")
+
+            # ---- 交配精液候補 ----
+            st.markdown("#### 交配精液候補")
+            mrow = entry["mate_row"]
+            CAND_STYLE = "font-size:1.35rem;line-height:2.1;margin:4px 0 12px 0"
+            if mrow is not None:
+                st.markdown(
+                    f"<div style='{CAND_STYLE}'><b>登録済み候補：</b><br>"
+                    f"第1候補: <b>{mrow.候補1}</b>　／　第2候補: <b>{mrow.候補2}</b>　／　"
+                    f"第3候補: <b>{mrow.候補3}</b></div>", unsafe_allow_html=True)
+            else:
+                st.info("この牛の登録済み交配精液候補が見つかりません。")
+
+            st.markdown("##### 遺伝的順位に基づく候補判定")
+            if grow is None or not trait_cols:
+                st.info("ゲノム情報がないため、順位に基づく判定はできません。")
+            else:
+                mc1, mc2 = st.columns([1, 2])
+                with mc1:
+                    thresh_trait = st.selectbox("基準とする形質", trait_cols,
+                                                 index=trait_cols.index("TPI") if "TPI" in trait_cols else 0,
+                                                 key="trait_select_mating")
+                with mc2:
+                    thresh_val = st.slider("牛群内順位の基準（この値以上で候補精液を提示）", 1, 100, 50, 1,
+                                            key="mating_threshold")
+                pct = grow.get(f"pct__{thresh_trait}")
+                if pd.isna(pct):
+                    st.info(f"{thresh_trait} のデータがありません。")
+                elif pct >= thresh_val:
+                    st.success(f"{thresh_trait} の牛群内順位は {pct:.0f}%（基準 {thresh_val}% 以上）→ "
+                               f"候補精液を使用します。")
+                    if mrow is not None:
+                        st.markdown(
+                            f"<div style='{CAND_STYLE}'>"
+                            f"・第1候補: <b>{mrow.候補1}</b><br>"
+                            f"・第2候補: <b>{mrow.候補2}</b><br>"
+                            f"・第3候補: <b>{mrow.候補3}</b></div>", unsafe_allow_html=True)
+                    else:
+                        st.warning("登録済み候補精液が見つからないため、別途ご確認ください。")
+                else:
+                    st.warning(f"{thresh_trait} の牛群内順位は {pct:.0f}%（基準 {thresh_val}% 未満）→ "
+                               f"**F1・和牛**（候補精液の対象外）")
+
+            st.markdown("---")
+
+            # ---- 基本情報 ----
             c1, c2, c3 = st.columns(3)
             c1.metric("牛番号", query)
             c2.metric("月齢", f"{age_months} ヶ月" if age_months is not None else "不明")
@@ -487,69 +556,6 @@ with TABS[0]:
                 disp_hist.columns = ["授精日", "品種", "方法", "結果", "技術者"]
                 disp_hist["授精日"] = disp_hist["授精日"].dt.strftime("%Y/%m/%d")
                 st.dataframe(disp_hist.reset_index(drop=True), use_container_width=True)
-
-            st.markdown("---")
-
-            # ---- 遺伝的順位 ----
-            st.markdown("#### 遺伝的順位（牛群内パーセンタイル）")
-            grow = entry["genomic_row"]
-            if grow is None:
-                st.info("この牛のゲノム情報が見つかりません（ゲノム検査未実施、または紐付け未確認の可能性があります）。")
-            else:
-                always_show = ["DWP$", "NM$", "TPI"]
-                gc1, gc2, gc3 = st.columns(3)
-                for col, trait in zip([gc1, gc2, gc3], always_show):
-                    if trait in trait_cols:
-                        val = grow.get(trait)
-                        pct = grow.get(f"pct__{trait}")
-                        col.metric(trait, f"{val:.0f}" if pd.notna(val) else "-",
-                                   f"上位{100-pct:.0f}% (順位{pct:.0f}%)" if pd.notna(pct) else "")
-
-                other_traits = [t for t in trait_cols if t not in always_show]
-                sel_trait = st.selectbox("その他の形質を選択", other_traits, key="trait_select_1")
-                if sel_trait:
-                    val = grow.get(sel_trait)
-                    pct = grow.get(f"pct__{sel_trait}")
-                    st.metric(sel_trait, f"{val:.2f}" if pd.notna(val) else "-",
-                              f"牛群内順位 {pct:.0f}%" if pd.notna(pct) else "")
-
-            st.markdown("---")
-
-            # ---- 交配精液候補 ----
-            st.markdown("#### 交配精液候補")
-            mrow = entry["mate_row"]
-            if mrow is not None:
-                st.markdown(
-                    f"**登録済み候補：** 第1候補: {mrow.候補1}　／　第2候補: {mrow.候補2}　／　第3候補: {mrow.候補3}")
-            else:
-                st.info("この牛の登録済み交配精液候補が見つかりません。")
-
-            st.markdown("##### 遺伝的順位に基づく候補判定")
-            if grow is None or not trait_cols:
-                st.info("ゲノム情報がないため、順位に基づく判定はできません。")
-            else:
-                mc1, mc2 = st.columns([1, 2])
-                with mc1:
-                    thresh_trait = st.selectbox("基準とする形質", trait_cols,
-                                                 index=trait_cols.index("TPI") if "TPI" in trait_cols else 0,
-                                                 key="trait_select_mating")
-                with mc2:
-                    thresh_val = st.slider("牛群内順位の基準（この値以上で候補精液を提示）", 1, 100, 50, 1,
-                                            key="mating_threshold")
-                pct = grow.get(f"pct__{thresh_trait}")
-                if pd.isna(pct):
-                    st.info(f"{thresh_trait} のデータがありません。")
-                elif pct >= thresh_val:
-                    st.success(f"{thresh_trait} の牛群内順位は {pct:.0f}%（基準 {thresh_val}% 以上）→ "
-                               f"候補精液を使用します。")
-                    if mrow is not None:
-                        st.markdown(f"- 第1候補: **{mrow.候補1}**\n- 第2候補: **{mrow.候補2}**\n- 第3候補: **{mrow.候補3}**")
-                    else:
-                        st.warning("登録済み候補精液が見つからないため、別途ご確認ください。")
-                else:
-                    st.warning(f"{thresh_trait} の牛群内順位は {pct:.0f}%（基準 {thresh_val}% 未満）→ "
-                               f"**F1・和牛**（候補精液の対象外）")
-
 # ══════════════════════════════════════════════════════════════════
 #  TAB 2: 授精成績分析（受胎率）
 # ══════════════════════════════════════════════════════════════════
