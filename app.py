@@ -17,6 +17,7 @@ FILES = {
     "insem": "insemination.csv",
     "mate": "mating_candidates.csv",
     "genomic": "genomic.xlsx",
+    "herd": "herd_list.csv",
 }
 
 # ══════════════════════════════════════════════════════════════════
@@ -314,7 +315,35 @@ def process_genomic(raw_bytes):
     return df, trait_cols
 
 
-def build_cow_master(insem_df, mate_df, genomic_df):
+def process_herd_list(raw_bytes):
+    """現在牛群にいる牛の名簿（育成牛リスト等）を読み込む。
+    授精記録・ゲノム情報どちらにも登場しない（＝一度も授精されておらず、
+    ゲノム情報も長形10桁でしか登録されていない）牛でも、この名簿に牛番号が
+    載っていれば検索対象に含められるようにするための補助データ。
+    列名は農場によって表記ゆれがありうるため、よくある候補名から自動検出する。
+    見つからない場合は1列目を牛番号、2列目を生年月日として扱う。"""
+    if raw_bytes is None:
+        return None
+    df = read_csv_auto(raw_bytes)
+    df.columns = [c.strip() for c in df.columns]
+    cols = list(df.columns)
+
+    id_candidates = ["ID", "id", "牛番号", "個体番号", "管理番号", "耳標番号"]
+    bdat_candidates = ["BDAT", "生年月日", "出生年月日", "BIRTH", "BirthDate"]
+
+    id_col = next((c for c in id_candidates if c in df.columns), cols[0] if cols else None)
+    bdat_col = next((c for c in bdat_candidates if c in df.columns), None)
+    if bdat_col is None and len(cols) > 1:
+        bdat_col = cols[1]
+
+    out = pd.DataFrame()
+    out["牛番号"] = df[id_col].apply(normalize_eartag) if id_col else ""
+    out["bdat"] = parse_date_col(df[bdat_col]) if bdat_col and bdat_col in df.columns else pd.NaT
+    out = out[out["牛番号"] != ""]
+    return out.reset_index(drop=True)
+
+
+def build_cow_master(insem_df, mate_df, genomic_df, herd_df=None):
     """牛番号(farm_id)を軸に、ゲノム情報・交配候補を紐付けたマスタを構築する。
     紐付けロジック（農場の運用ルールに基づく厳密な桁位置指定）：
       1. ゲノムID(短縮形 U+4桁) が牛番号と完全一致
@@ -327,8 +356,9 @@ def build_cow_master(insem_df, mate_df, genomic_df):
       桁位置を固定した本ロジックに修正済み。
 
     検索対象となる牛番号(farm_id)の集合は、①授精記録に登場する牛番号、②ゲノム情報が
-    短縮形(4桁)で登録されている牛番号、の和集合とする。これにより、まだ一度も授精
-    されていない（授精記録がない）牛でも、ゲノム検査済みであれば検索・表示できる。"""
+    短縮形(4桁)で登録されている牛番号、③（任意）育成牛リスト等の名簿ファイルに
+    登場する牛番号、の和集合とする。これにより、まだ一度も授精されていない牛でも、
+    ゲノム検査済み、または名簿に登録されていれば検索・表示できる。"""
 
     def digits_6to9(core):
         """10桁の耳標番号文字列から6〜9桁目(4桁)を取り出す。10桁でなければNoneを返す。"""
@@ -352,15 +382,24 @@ def build_cow_master(insem_df, mate_df, genomic_df):
             if key:
                 mate_by_farmid[key] = m
 
+    herd_bdat_by_farmid = {}
+    herd_ids = set()
+    if herd_df is not None:
+        for h in herd_df.itertuples(index=False):
+            herd_ids.add(h.牛番号)
+            if pd.notna(h.bdat):
+                herd_bdat_by_farmid[h.牛番号] = h.bdat
+
     insem_ids = set(insem_df["ID"].unique()) if insem_df is not None else set()
-    farm_ids = sorted(insem_ids | set(genomic_short.keys()))
+    farm_ids = sorted(insem_ids | set(genomic_short.keys()) | herd_ids)
     if not farm_ids:
         return {}, {"genomic_matched": 0, "genomic_unmatched": [], "mate_matched": 0, "mate_unmatched": []}
 
     master = {}
     diagnostics = {"genomic_matched": 0, "genomic_unmatched": [], "mate_matched": 0, "mate_unmatched": []}
     for fid in farm_ids:
-        entry = {"farm_id": fid, "genomic_row": None, "mate_row": None}
+        entry = {"farm_id": fid, "genomic_row": None, "mate_row": None,
+                  "herd_bdat": herd_bdat_by_farmid.get(fid)}
         entry["genomic_row"] = genomic_short.get(fid)
         if entry["genomic_row"] is None:
             entry["genomic_row"] = genomic_long_by_farmid.get(fid)
@@ -397,6 +436,10 @@ with st.sidebar.expander("データを更新（CSV取り込み）", expanded=Fal
     up_insem = st.file_uploader("① 授精記録（CSV）", type=["csv"], key="up_insem")
     up_mate = st.file_uploader("② 交配精液候補（CSV）", type=["csv"], key="up_mate")
     up_genomic = st.file_uploader("③ ゲノム情報（Excel）", type=["xlsx", "xls"], key="up_genomic")
+    up_herd = st.file_uploader("④ 育成牛リスト・名簿（CSV、任意）", type=["csv"], key="up_herd",
+                                help="授精記録・ゲノム短縮IDのどちらにも登場しない牛（未授精の育成牛等）"
+                                     "も検索対象に含めたい場合にご利用ください。1列目を牛番号、"
+                                     "2列目を生年月日として読み込みます。")
     if st.button("保存してデータを共有する", type="primary"):
         saved = []
         if up_insem:
@@ -409,6 +452,9 @@ with st.sidebar.expander("データを更新（CSV取り込み）", expanded=Fal
             save_upload(up_genomic, FILES["genomic"],
                         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
             saved.append("ゲノム情報")
+        if up_herd:
+            save_upload(up_herd, FILES["herd"], "text/csv")
+            saved.append("育成牛リスト")
         if saved:
             st.session_state["upload_ver"] = st.session_state.get("upload_ver", 0) + 1
             st.cache_data.clear()
@@ -421,16 +467,18 @@ with st.sidebar.expander("データを更新（CSV取り込み）", expanded=Fal
 insem_raw, insem_ts = load_raw(FILES["insem"])
 mate_raw, mate_ts = load_raw(FILES["mate"])
 genomic_raw, genomic_ts = load_raw(FILES["genomic"])
+herd_raw, herd_ts = load_raw(FILES["herd"])
 
 insem_df = process_insemination(insem_raw)
 mate_df = process_mating(mate_raw)
 genomic_df, trait_cols = process_genomic(genomic_raw)
+herd_df = process_herd_list(herd_raw)
 
-cow_master, match_diag = build_cow_master(insem_df, mate_df, genomic_df)
+cow_master, match_diag = build_cow_master(insem_df, mate_df, genomic_df, herd_df)
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("**データ読み込み状況**")
-for lbl, ts in [("授精記録", insem_ts), ("交配精液候補", mate_ts), ("ゲノム情報", genomic_ts)]:
+for lbl, ts in [("授精記録", insem_ts), ("交配精液候補", mate_ts), ("ゲノム情報", genomic_ts), ("育成牛リスト", herd_ts)]:
     st.sidebar.markdown(("OK " if ts else "-- ") + lbl + (f"  `{ts}`" if ts else ""))
 
 st.markdown(
@@ -463,6 +511,8 @@ with TABS[0]:
             hist = insem_df[insem_df["ID"] == query].sort_values("_date", ascending=False)
 
             bdat = hist["_bdat"].dropna().iloc[0] if hist["_bdat"].notna().any() else None
+            if bdat is None and entry.get("herd_bdat") is not None:
+                bdat = entry["herd_bdat"]
             age_months = None
             if bdat is not None:
                 delta = relativedelta(date.today(), bdat.date())
@@ -481,7 +531,7 @@ with TABS[0]:
                         val = grow.get(trait)
                         pct = grow.get(f"pct__{trait}")
                         col.metric(trait, f"{val:.0f}" if pd.notna(val) else "-",
-                                   f"上位{100-pct:.0f}% (順位{pct:.0f}%)" if pd.notna(pct) else "")
+                                   f"順位 {pct:.0f}%" if pd.notna(pct) else "")
 
                 other_traits = [t for t in trait_cols if t not in always_show]
                 sel_trait = st.selectbox("その他の形質を選択", other_traits, key="trait_select_1")
@@ -645,7 +695,7 @@ with TABS[2]:
 
     st.markdown("---")
     st.markdown("#### 元データプレビュー")
-    pv1, pv2, pv3 = st.tabs(["授精記録", "交配精液候補", "ゲノム情報"])
+    pv1, pv2, pv3, pv4 = st.tabs(["授精記録", "交配精液候補", "ゲノム情報", "育成牛リスト"])
     with pv1:
         if insem_df is not None:
             st.dataframe(insem_df.head(50), use_container_width=True)
@@ -655,3 +705,8 @@ with TABS[2]:
     with pv3:
         if genomic_df is not None:
             st.dataframe(genomic_df.head(50), use_container_width=True)
+    with pv4:
+        if herd_df is not None:
+            st.dataframe(herd_df.head(50), use_container_width=True)
+        else:
+            st.info("育成牛リストは未取り込みです（任意ファイルのため必須ではありません）。")
