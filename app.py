@@ -507,6 +507,19 @@ else:
     thresh_trait, thresh_val = None, 50
     st.sidebar.info("ゲノム情報を読み込むと設定できます。")
 
+st.sidebar.markdown("---")
+st.sidebar.markdown("**表示する形質（追加）**")
+st.sidebar.caption("DWP$・NM$・TPI以外に常に表示したい形質を複数選択できます。")
+ALWAYS_SHOW_TRAITS = ["DWP$", "NM$", "TPI"]
+if trait_cols:
+    extra_trait_options = [t for t in trait_cols if t not in ALWAYS_SHOW_TRAITS]
+    selected_extra_traits = st.sidebar.multiselect(
+        "追加で表示する形質（複数選択可）", extra_trait_options,
+        default=["乳量"] if "乳量" in extra_trait_options else [],
+        key="trait_multiselect_extra")
+else:
+    selected_extra_traits = []
+
 st.markdown(
     f"<div style='display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;"
     f"position:sticky;top:0;z-index:200;background:white;padding:8px 0 4px 0;"
@@ -550,9 +563,8 @@ with TABS[0]:
             if grow is None:
                 st.info("この牛のゲノム情報が見つかりません（ゲノム検査未実施、または紐付け未確認の可能性があります）。")
             else:
-                always_show = ["DWP$", "NM$", "TPI"]
                 gc1, gc2, gc3 = st.columns(3)
-                for col, trait in zip([gc1, gc2, gc3], always_show):
+                for col, trait in zip([gc1, gc2, gc3], ALWAYS_SHOW_TRAITS):
                     if trait in trait_cols:
                         val = grow.get(trait)
                         pct = grow.get(f"pct__{trait}")
@@ -560,14 +572,15 @@ with TABS[0]:
                         col.metric(label, f"{val:.0f}" if pd.notna(val) else "-",
                                    f"順位 {pct:.0f}%" if pd.notna(pct) else "")
 
-                other_traits = [t for t in trait_cols if t not in always_show]
-                sel_trait = st.selectbox("その他の形質を選択", other_traits, key="trait_select_1")
-                if sel_trait:
-                    val = grow.get(sel_trait)
-                    pct = grow.get(f"pct__{sel_trait}")
-                    label = sel_trait + "（低いほど良い）" if is_lower_better(sel_trait) else sel_trait
-                    st.metric(label, f"{val:.2f}" if pd.notna(val) else "-",
-                              f"牛群内順位 {pct:.0f}%" if pd.notna(pct) else "")
+                if selected_extra_traits:
+                    st.markdown("&nbsp;", unsafe_allow_html=True)
+                    extra_cols = st.columns(3)
+                    for i, trait in enumerate(selected_extra_traits):
+                        val = grow.get(trait)
+                        pct = grow.get(f"pct__{trait}")
+                        label = trait + "（低いほど良い）" if is_lower_better(trait) else trait
+                        extra_cols[i % 3].metric(label, f"{val:.2f}" if pd.notna(val) else "-",
+                                                  f"順位 {pct:.0f}%" if pd.notna(pct) else "")
 
             st.markdown("---")
 
