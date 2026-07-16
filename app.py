@@ -316,48 +316,60 @@ def process_genomic(raw_bytes):
 
 def build_cow_master(insem_df, mate_df, genomic_df):
     """牛番号(farm_id)を軸に、ゲノム情報・交配候補を紐付けたマスタを構築する。
-    紐付けロジック：
+    紐付けロジック（農場の運用ルールに基づく厳密な桁位置指定）：
       1. ゲノムID(短縮形 U+4桁) が牛番号と完全一致
-      2. 牛番号が ゲノムID(長形 U+10桁) の部分文字列として含まれる
-      3. 牛番号が 交配候補ファイルの耳標番号 の部分文字列として含まれる
-    （農場の耳標運用上、牛番号が耳標番号の一部として埋め込まれているため）"""
-    if insem_df is None:
-        return pd.DataFrame(), {}
+      2. ゲノムID(長形 U+10桁) の 6〜9桁目 が牛番号(4桁)と完全一致
+         （例：耳標 1398433135 の6〜9桁目「3313」= 牛番号3313）
+      3. 交配候補ファイルの耳標番号(10桁) の 6〜9桁目 が牛番号(4桁)と完全一致
+    ※ 以前は「牛番号が耳標番号のどこかに部分文字列として含まれるか」という緩い判定を
+      使っていたが、これは桁位置を問わない判定のため、無関係な個体の耳標にたまたま
+      同じ数字の並びが含まれるケースで誤紐付けが発生しうる不具合があった。
+      桁位置を固定した本ロジックに修正済み。
 
-    farm_ids = sorted(insem_df["ID"].unique())
+    検索対象となる牛番号(farm_id)の集合は、①授精記録に登場する牛番号、②ゲノム情報が
+    短縮形(4桁)で登録されている牛番号、の和集合とする。これにより、まだ一度も授精
+    されていない（授精記録がない）牛でも、ゲノム検査済みであれば検索・表示できる。"""
+
+    def digits_6to9(core):
+        """10桁の耳標番号文字列から6〜9桁目(4桁)を取り出す。10桁でなければNoneを返す。"""
+        return core[5:9] if len(core) == 10 else None
+
     genomic_short = {}
-    genomic_long = []
+    genomic_long_by_farmid = {}
     if genomic_df is not None:
         for _, row in genomic_df.iterrows():
             if row["_id_kind"] == "short":
                 genomic_short[row["_id_core"]] = row
             elif row["_id_kind"] == "long":
-                genomic_long.append((row["_id_core"], row))
+                key = digits_6to9(row["_id_core"])
+                if key:
+                    genomic_long_by_farmid[key] = row
 
-    mate_by_tag = []
+    mate_by_farmid = {}
     if mate_df is not None:
-        mate_by_tag = list(mate_df.itertuples(index=False))
+        for m in mate_df.itertuples(index=False):
+            key = digits_6to9(m.eartag)
+            if key:
+                mate_by_farmid[key] = m
+
+    insem_ids = set(insem_df["ID"].unique()) if insem_df is not None else set()
+    farm_ids = sorted(insem_ids | set(genomic_short.keys()))
+    if not farm_ids:
+        return {}, {"genomic_matched": 0, "genomic_unmatched": [], "mate_matched": 0, "mate_unmatched": []}
 
     master = {}
     diagnostics = {"genomic_matched": 0, "genomic_unmatched": [], "mate_matched": 0, "mate_unmatched": []}
     for fid in farm_ids:
         entry = {"farm_id": fid, "genomic_row": None, "mate_row": None}
-        if fid in genomic_short:
-            entry["genomic_row"] = genomic_short[fid]
-        else:
-            for core, row in genomic_long:
-                if fid in core:
-                    entry["genomic_row"] = row
-                    break
+        entry["genomic_row"] = genomic_short.get(fid)
+        if entry["genomic_row"] is None:
+            entry["genomic_row"] = genomic_long_by_farmid.get(fid)
         if entry["genomic_row"] is not None:
             diagnostics["genomic_matched"] += 1
         else:
             diagnostics["genomic_unmatched"].append(fid)
 
-        for m in mate_by_tag:
-            if fid in m.eartag:
-                entry["mate_row"] = m
-                break
+        entry["mate_row"] = mate_by_farmid.get(fid)
         if entry["mate_row"] is not None:
             diagnostics["mate_matched"] += 1
         else:
