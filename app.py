@@ -284,6 +284,16 @@ def process_mating(raw_bytes):
     return out.reset_index(drop=True)
 
 
+# 「値が低いほど良い」形質。この形質は他と逆に、値が低いほどパーセンタイル(pct__)が
+# 100%に近づくよう反転して計算する。SCS(体細胞スコア)・SCE(種雄牛難産率)はCDCBの
+# 標準的な遺伝評価で「低いほど良い」とされる代表的な形質。
+LOWER_IS_BETTER_TRAITS = {"SCS", "SCE"}
+
+
+def is_lower_better(trait_name):
+    return str(trait_name).strip().upper() in LOWER_IS_BETTER_TRAITS
+
+
 def process_genomic(raw_bytes):
     if raw_bytes is None:
         return None, []
@@ -309,9 +319,10 @@ def process_genomic(raw_bytes):
     trait_cols = [c for c in df.columns if c not in ("動物ID", "Official ID", "レコードの種牡馬NAAB", "_id_core", "_id_kind")]
     for c in trait_cols:
         df[c] = pd.to_numeric(df[c], errors="coerce")
-    # 牛群内パーセンタイル順位（1〜100%、値が大きいほど良い形質を想定）
+    # 牛群内パーセンタイル順位（1〜100%、通常は値が大きいほど良い形質として計算するが、
+    # LOWER_IS_BETTER_TRAITSに該当する形質は値が小さいほど100%に近づくよう反転する）
     for c in trait_cols:
-        df[f"pct__{c}"] = df[c].rank(pct=True, method="average") * 100
+        df[f"pct__{c}"] = df[c].rank(pct=True, ascending=not is_lower_better(c), method="average") * 100
     return df, trait_cols
 
 
@@ -481,6 +492,21 @@ st.sidebar.markdown("**データ読み込み状況**")
 for lbl, ts in [("授精記録", insem_ts), ("交配精液候補", mate_ts), ("ゲノム情報", genomic_ts), ("育成牛リスト", herd_ts)]:
     st.sidebar.markdown(("OK " if ts else "-- ") + lbl + (f"  `{ts}`" if ts else ""))
 
+st.sidebar.markdown("---")
+st.sidebar.markdown("**交配精液候補の判定基準**")
+st.sidebar.caption("牛番号を検索し直しても、ここで設定した基準は保持されます。")
+if trait_cols:
+    thresh_trait = st.sidebar.selectbox(
+        "基準とする形質", trait_cols,
+        index=trait_cols.index("TPI") if "TPI" in trait_cols else 0,
+        key="trait_select_mating")
+    thresh_val = st.sidebar.slider(
+        "牛群内順位の基準（この値以上で候補精液を提示）", 1, 100, 50, 1,
+        key="mating_threshold")
+else:
+    thresh_trait, thresh_val = None, 50
+    st.sidebar.info("ゲノム情報を読み込むと設定できます。")
+
 st.markdown(
     f"<div style='display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;"
     f"position:sticky;top:0;z-index:200;background:white;padding:8px 0 4px 0;"
@@ -530,7 +556,8 @@ with TABS[0]:
                     if trait in trait_cols:
                         val = grow.get(trait)
                         pct = grow.get(f"pct__{trait}")
-                        col.metric(trait, f"{val:.0f}" if pd.notna(val) else "-",
+                        label = trait + "（低いほど良い）" if is_lower_better(trait) else trait
+                        col.metric(label, f"{val:.0f}" if pd.notna(val) else "-",
                                    f"順位 {pct:.0f}%" if pd.notna(pct) else "")
 
                 other_traits = [t for t in trait_cols if t not in always_show]
@@ -538,41 +565,36 @@ with TABS[0]:
                 if sel_trait:
                     val = grow.get(sel_trait)
                     pct = grow.get(f"pct__{sel_trait}")
-                    st.metric(sel_trait, f"{val:.2f}" if pd.notna(val) else "-",
+                    label = sel_trait + "（低いほど良い）" if is_lower_better(sel_trait) else sel_trait
+                    st.metric(label, f"{val:.2f}" if pd.notna(val) else "-",
                               f"牛群内順位 {pct:.0f}%" if pd.notna(pct) else "")
 
             st.markdown("---")
 
             # ---- 交配精液候補 ----
+            # サイドバーで設定した基準（thresh_trait・thresh_val）を用いて、登録済み候補を
+            # 表示するか「F1・和牛」と表示するかを判定する。この基準はサイドバーに置かれて
+            # いるため、牛番号を検索し直しても設定がリセットされない。
             st.markdown("#### 交配精液候補")
             mrow = entry["mate_row"]
             CAND_STYLE = "font-size:1.35rem;line-height:2.1;margin:4px 0 12px 0"
-            if mrow is not None:
-                st.markdown(
-                    f"<div style='{CAND_STYLE}'><b>登録済み候補：</b><br>"
-                    f"第1候補: <b>{mrow.候補1}</b>　／　第2候補: <b>{mrow.候補2}</b>　／　"
-                    f"第3候補: <b>{mrow.候補3}</b></div>", unsafe_allow_html=True)
-            else:
-                st.info("この牛の登録済み交配精液候補が見つかりません。")
 
-            st.markdown("##### 遺伝的順位に基づく候補判定")
-            if grow is None or not trait_cols:
+            if grow is None or not trait_cols or thresh_trait is None:
                 st.info("ゲノム情報がないため、順位に基づく判定はできません。")
+                if mrow is not None:
+                    st.markdown(
+                        f"<div style='{CAND_STYLE}'><b>登録済み候補：</b><br>"
+                        f"第1候補: <b>{mrow.候補1}</b>　／　第2候補: <b>{mrow.候補2}</b>　／　"
+                        f"第3候補: <b>{mrow.候補3}</b></div>", unsafe_allow_html=True)
+                else:
+                    st.info("この牛の登録済み交配精液候補が見つかりません。")
             else:
-                mc1, mc2 = st.columns([1, 2])
-                with mc1:
-                    thresh_trait = st.selectbox("基準とする形質", trait_cols,
-                                                 index=trait_cols.index("TPI") if "TPI" in trait_cols else 0,
-                                                 key="trait_select_mating")
-                with mc2:
-                    thresh_val = st.slider("牛群内順位の基準（この値以上で候補精液を提示）", 1, 100, 50, 1,
-                                            key="mating_threshold")
                 pct = grow.get(f"pct__{thresh_trait}")
+                trait_label = thresh_trait + "（低いほど良い）" if is_lower_better(thresh_trait) else thresh_trait
                 if pd.isna(pct):
-                    st.info(f"{thresh_trait} のデータがありません。")
+                    st.info(f"{trait_label} のデータがありません。")
                 elif pct >= thresh_val:
-                    st.success(f"{thresh_trait} の牛群内順位は {pct:.0f}%（基準 {thresh_val}% 以上）→ "
-                               f"候補精液を使用します。")
+                    st.success(f"{trait_label} の牛群内順位は {pct:.0f}%（基準 {thresh_val}% 以上）")
                     if mrow is not None:
                         st.markdown(
                             f"<div style='{CAND_STYLE}'>"
@@ -582,7 +604,7 @@ with TABS[0]:
                     else:
                         st.warning("登録済み候補精液が見つからないため、別途ご確認ください。")
                 else:
-                    st.warning(f"{thresh_trait} の牛群内順位は {pct:.0f}%（基準 {thresh_val}% 未満）→ "
+                    st.warning(f"{trait_label} の牛群内順位は {pct:.0f}%（基準 {thresh_val}% 未満）→ "
                                f"**F1・和牛**（候補精液の対象外）")
 
             st.markdown("---")
