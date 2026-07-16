@@ -544,7 +544,7 @@ with TABS[0]:
 
     if query:
         if query not in cow_master:
-            st.warning(f"牛番号「{query}」の授精記録が見つかりません。番号をご確認ください。")
+            st.warning(f"牛番号「{query}」が見つかりません。番号をご確認ください。")
         else:
             entry = cow_master[query]
             hist = insem_df[insem_df["ID"] == query].sort_values("_date", ascending=False)
@@ -585,9 +585,6 @@ with TABS[0]:
             st.markdown("---")
 
             # ---- 交配精液候補 ----
-            # サイドバーで設定した基準（thresh_trait・thresh_val）を用いて、登録済み候補を
-            # 表示するか「F1・和牛」と表示するかを判定する。この基準はサイドバーに置かれて
-            # いるため、牛番号を検索し直しても設定がリセットされない。
             st.markdown("#### 交配精液候補")
             mrow = entry["mate_row"]
             CAND_STYLE = "font-size:1.35rem;line-height:2.1;margin:4px 0 12px 0"
@@ -733,15 +730,19 @@ with TABS[2]:
     pv1, pv2, pv3, pv4 = st.tabs(["授精記録", "交配精液候補", "ゲノム情報", "育成牛リスト"])
     with pv1:
         if insem_df is not None:
-            st.dataframe(insem_df.head(50), use_container_width=True)
+            st.caption(f"全{len(insem_df)}件")
+            st.dataframe(insem_df, use_container_width=True)
     with pv2:
         if mate_df is not None:
-            st.dataframe(mate_df.head(50), use_container_width=True)
+            st.caption(f"全{len(mate_df)}件")
+            st.dataframe(mate_df, use_container_width=True)
     with pv3:
         if genomic_df is not None:
-            st.dataframe(genomic_df.head(50), use_container_width=True)
+            st.caption(f"全{len(genomic_df)}頭")
+            st.dataframe(genomic_df, use_container_width=True)
     with pv4:
         if herd_df is not None:
-            st.dataframe(herd_df.head(50), use_container_width=True)
+            st.caption(f"全{len(herd_df)}頭")
+            st.dataframe(herd_df, use_container_width=True)
         else:
             st.info("育成牛リストは未取り込みです（任意ファイルのため必須ではありません）。")
