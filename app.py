@@ -441,6 +441,11 @@ background-color:white;padding-top:4px;box-shadow:0 2px 4px rgba(0,0,0,.08)}
 
 _S = load_settings()
 
+# 直前の保存操作の結果（st.rerun()をまたいで表示を残すため、session_stateに退避しておく）
+if "_save_result" in st.session_state:
+    for _kind, _text in st.session_state.pop("_save_result"):
+        getattr(st, _kind)(_text)
+
 st.sidebar.title("植田牧場 メイティングアプリ")
 st.sidebar.markdown("---")
 with st.sidebar.expander("データを更新（CSV取り込み）", expanded=False):
@@ -452,27 +457,42 @@ with st.sidebar.expander("データを更新（CSV取り込み）", expanded=Fal
                                      "も検索対象に含めたい場合にご利用ください。1列目を牛番号、"
                                      "2列目を生年月日として読み込みます。")
     if st.button("保存してデータを共有する", type="primary"):
-        saved = []
-        if up_insem:
-            save_upload(up_insem, FILES["insem"], "text/csv")
-            saved.append("授精記録")
-        if up_mate:
-            save_upload(up_mate, FILES["mate"], "text/csv")
-            saved.append("交配精液候補")
-        if up_genomic:
-            save_upload(up_genomic, FILES["genomic"],
-                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-            saved.append("ゲノム情報")
-        if up_herd:
-            save_upload(up_herd, FILES["herd"], "text/csv")
-            saved.append("育成牛リスト")
-        if saved:
-            st.session_state["upload_ver"] = st.session_state.get("upload_ver", 0) + 1
-            st.cache_data.clear()
-            st.success(f"保存完了：{', '.join(saved)}（全端末に共有されます）")
-            st.rerun()
-        else:
+        uploads = [
+            (up_insem, FILES["insem"], "text/csv", "授精記録"),
+            (up_mate, FILES["mate"], "text/csv", "交配精液候補"),
+            (up_genomic, FILES["genomic"],
+             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "ゲノム情報"),
+            (up_herd, FILES["herd"], "text/csv", "育成牛リスト"),
+        ]
+        saved, failed = [], []
+        for _f, _fname, _mime, _label in uploads:
+            if _f is not None:
+                # save_upload() の戻り値（成功/失敗）を必ず確認する。
+                # 以前はここを確認せずファイルを選択しただけで「保存完了」扱いにしてしまい、
+                # 実際には保存に失敗していてもst.rerun()で即座に画面が再描画され、
+                # エラーメッセージが一瞬で消えてしまう不具合があった。
+                if save_upload(_f, _fname, _mime):
+                    saved.append(_label)
+                else:
+                    failed.append(_label)
+
+        if not saved and not failed:
             st.warning("ファイルを選択してください")
+        else:
+            msgs = []
+            if saved:
+                st.session_state["upload_ver"] = st.session_state.get("upload_ver", 0) + 1
+                st.cache_data.clear()
+                msgs.append(("success", f"保存完了：{', '.join(saved)}（全端末に共有されます）"))
+            if failed:
+                msgs.append(("error",
+                              f"保存失敗：{', '.join(failed)}（上に表示された詳細エラーをご確認ください。"
+                              f"Supabaseの接続設定またはストレージバケットに問題がある可能性があります）"))
+            st.session_state["_save_result"] = msgs
+            if saved:
+                # 一部でも保存できた場合のみ再読み込みする。全て失敗した場合はrerunせず、
+                # 上に表示された詳細エラー（st.error）がそのまま画面に残るようにする。
+                st.rerun()
 
 # データ読み込み
 insem_raw, insem_ts = load_raw(FILES["insem"])
