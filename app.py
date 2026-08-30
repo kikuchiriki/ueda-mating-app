@@ -446,6 +446,13 @@ if "_save_result" in st.session_state:
     for _kind, _text in st.session_state.pop("_save_result"):
         getattr(st, _kind)(_text)
 
+with st.sidebar.expander("🔧 デバッグ：Secrets診断（確認後は削除してください）", expanded=True):
+    try:
+        _dbg_url = st.secrets["supabase"]["url"]
+        st.code(f"repr: {_dbg_url!r}\nlen: {len(_dbg_url)}")
+    except Exception as e:
+        st.error(f"読み込みエラー: {e}")
+
 st.sidebar.title("植田牧場 メイティングアプリ")
 st.sidebar.markdown("---")
 with st.sidebar.expander("データを更新（CSV取り込み）", expanded=False):
