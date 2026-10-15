@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import re, json, io, hashlib
+import re, json, io, csv, hashlib
 import plotly.graph_objects as go
 from datetime import date, datetime
 from dateutil.relativedelta import relativedelta
@@ -294,30 +294,112 @@ def is_lower_better(trait_name):
     return str(trait_name).strip().upper() in LOWER_IS_BETTER_TRAITS
 
 
-def process_genomic(raw_bytes):
-    if raw_bytes is None:
-        return None, []
+def _find_genomic_header_row(rows):
+    """行のリスト（2次元配列）から「1列目が"動物ID"となっている行」を探してその添字を返す。
+    見つからない場合はNoneを返す。固定の行番号に依存せず実データからヘッダー行を特定するための
+    共通ヘルパー（Excel・CSVどちらの読み込みでも使用する）。"""
+    for i, row in enumerate(rows):
+        if row and row[0] is not None and str(row[0]).strip() == "動物ID":
+            return i
+    return None
+
+
+def _dedupe_columns(headers):
+    """列名の空欄・重複を解消し、必ず一意な列名のリストを返す。
+    空欄や重複した列名がDataFrameに残ると df[col] がSeriesではなくDataFrameを返してしまい、
+    pd.to_numeric()などで `TypeError: arg must be a list, tuple, 1-d array, or Series` が
+    発生する（ヘッダー行の特定がずれた場合などに実際に発生した不具合）。その再発を防ぐための
+    安全策として、読み込み時に必ずこの関数を通す。"""
+    seen = {}
+    result = []
+    for h in headers:
+        name = str(h).strip() if h is not None and str(h).strip() != "" else "_blank"
+        if name in seen:
+            seen[name] += 1
+            name = f"{name}_{seen[name]}"
+        else:
+            seen[name] = 0
+        result.append(name)
+    return result
+
+
+def _read_genomic_xlsx(raw_bytes):
+    """Excel(.xlsx/.xls)形式のゲノム情報を読み込む（従来からのZoetis Searchpointエクスポート形式）。
+    ヘッダー行は「1列目が"動物ID"となっている行」を実際に探して特定し、万一見つからない場合のみ
+    従来仕様の13行目にフォールバックする。"""
     import openpyxl
     wb = openpyxl.load_workbook(io.BytesIO(raw_bytes), data_only=True)
     ws = wb[wb.sheetnames[0]]
-    header_row = 13
-    headers = [ws.cell(row=header_row, column=c).value for c in range(1, ws.max_column + 1)]
-    headers = [h for h in headers if h is not None]
+    all_rows = [[ws.cell(row=r, column=c).value for c in range(1, ws.max_column + 1)]
+                for r in range(1, ws.max_row + 1)]
+    header_idx = _find_genomic_header_row(all_rows)
+    if header_idx is None:
+        header_idx = 12  # 従来仕様（13行目、0始まりで12）へのフォールバック
+    headers = [h for h in all_rows[header_idx] if h is not None]
     n_cols = len(headers)
     rows = []
-    for r in range(header_row + 1, ws.max_row + 1):
-        vals = [ws.cell(row=r, column=c).value for c in range(1, n_cols + 1)]
-        if vals[0] is None:
+    for row in all_rows[header_idx + 1:]:
+        vals = row[:n_cols]
+        if not vals or vals[0] is None:
             continue
         rows.append(vals)
-    df = pd.DataFrame(rows, columns=headers)
-    id_col = headers[0]
+    headers = _dedupe_columns(headers)
+    return pd.DataFrame(rows, columns=headers)
+
+
+def _read_genomic_csv(raw_bytes):
+    """CSV形式のゲノム情報を読み込む（2026年9月頃からのZoetis Searchpointエクスポート形式）。
+    ファイル上部にフィルタ条件・顧客名・統計サマリー（最小/平均/最大）などの行が付くため、
+    固定の行番号ではなく「1列目が"動物ID"となっている行」を実際に探してヘッダー行として扱う。"""
+    text = None
+    for enc in ["utf-8-sig", "cp932", "utf-8"]:
+        try:
+            text = raw_bytes.decode(enc)
+            break
+        except Exception:
+            continue
+    if text is None:
+        text = raw_bytes.decode("utf-8", errors="replace")
+    all_rows = list(csv.reader(io.StringIO(text)))
+    header_idx = _find_genomic_header_row(all_rows)
+    if header_idx is None:
+        return None
+    headers = [h for h in all_rows[header_idx] if h is not None and str(h).strip() != ""]
+    n_cols = len(headers)
+    rows = []
+    for row in all_rows[header_idx + 1:]:
+        if not row or row[0] is None or str(row[0]).strip() == "":
+            continue
+        vals = (row + [None] * n_cols)[:n_cols]
+        rows.append(vals)
+    headers = _dedupe_columns(headers)
+    return pd.DataFrame(rows, columns=headers)
+
+
+def process_genomic(raw_bytes):
+    """ゲノム情報を読み込む。Excel(.xlsx/.xls)・CSVのどちらの形式にも対応し、
+    ファイルの拡張子ではなく実際の中身（先頭バイトがZIP形式かどうか）で判定する
+    （拡張子だけを偽って保存された場合でも正しく読み分けられるようにするため）。"""
+    if raw_bytes is None:
+        return None, []
+    if raw_bytes[:2] == b"PK":
+        df = _read_genomic_xlsx(raw_bytes)
+    else:
+        df = _read_genomic_csv(raw_bytes)
+    if df is None or df.empty:
+        return None, []
+    id_col = df.columns[0]
     df = df.rename(columns={id_col: "動物ID"})
     df["動物ID"] = df["動物ID"].astype(str).str.strip()
-    df["_id_core"] = df["動物ID"].str.replace("^U", "", regex=True)
+    df["_id_core"] = df["動物ID"].str.replace(r"^[Uu]", "", regex=True)
     df["_id_kind"] = df["_id_core"].apply(lambda x: "short" if len(x) == 4 else ("long" if len(x) == 10 else "other"))
-    trait_cols = [c for c in df.columns if c not in ("動物ID", "Official ID", "レコードの種牡馬NAAB", "_id_core", "_id_kind")]
+    NON_TRAIT_COLS = {"動物ID", "Official ID", "動物名", "Group", "Sex", "Status",
+                       "生年月日", "品種", "レコードの種牡馬NAAB", "_id_core", "_id_kind"}
+    trait_cols = [c for c in df.columns
+                  if c not in NON_TRAIT_COLS and not str(c).startswith("_blank")]
     for c in trait_cols:
+        if df[c].dtype == object:
+            df[c] = df[c].astype(str).str.replace(",", "", regex=False)
         df[c] = pd.to_numeric(df[c], errors="coerce")
     # 牛群内パーセンタイル順位（1〜100%、通常は値が大きいほど良い形質として計算するが、
     # LOWER_IS_BETTER_TRAITSに該当する形質は値が小さいほど100%に近づくよう反転する）
@@ -446,29 +528,26 @@ if "_save_result" in st.session_state:
     for _kind, _text in st.session_state.pop("_save_result"):
         getattr(st, _kind)(_text)
 
-with st.sidebar.expander("🔧 デバッグ：Secrets診断（確認後は削除してください）", expanded=True):
-    try:
-        _dbg_url = st.secrets["supabase"]["url"]
-        st.code(f"repr: {_dbg_url!r}\nlen: {len(_dbg_url)}")
-    except Exception as e:
-        st.error(f"読み込みエラー: {e}")
-
 st.sidebar.title("植田牧場 メイティングアプリ")
 st.sidebar.markdown("---")
 with st.sidebar.expander("データを更新（CSV取り込み）", expanded=False):
     up_insem = st.file_uploader("① 授精記録（CSV）", type=["csv"], key="up_insem")
     up_mate = st.file_uploader("② 交配精液候補（CSV）", type=["csv"], key="up_mate")
-    up_genomic = st.file_uploader("③ ゲノム情報（Excel）", type=["xlsx", "xls"], key="up_genomic")
+    up_genomic = st.file_uploader("③ ゲノム情報（Excel/CSV）", type=["xlsx", "xls", "csv"], key="up_genomic",
+                                   help="Zoetis SearchpointからのエクスポートはExcel(.xlsx)・CSV(.csv)の"
+                                        "どちらの形式でも読み込めます。")
     up_herd = st.file_uploader("④ 育成牛リスト・名簿（CSV、任意）", type=["csv"], key="up_herd",
                                 help="授精記録・ゲノム短縮IDのどちらにも登場しない牛（未授精の育成牛等）"
                                      "も検索対象に含めたい場合にご利用ください。1列目を牛番号、"
                                      "2列目を生年月日として読み込みます。")
     if st.button("保存してデータを共有する", type="primary"):
+        _genomic_mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        if up_genomic is not None and up_genomic.name.lower().endswith(".csv"):
+            _genomic_mime = "text/csv"
         uploads = [
             (up_insem, FILES["insem"], "text/csv", "授精記録"),
             (up_mate, FILES["mate"], "text/csv", "交配精液候補"),
-            (up_genomic, FILES["genomic"],
-             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "ゲノム情報"),
+            (up_genomic, FILES["genomic"], _genomic_mime, "ゲノム情報"),
             (up_herd, FILES["herd"], "text/csv", "育成牛リスト"),
         ]
         saved, failed = [], []
@@ -509,7 +588,17 @@ herd_raw, herd_ts = load_raw(FILES["herd"])
 
 insem_df = process_insemination(insem_raw)
 mate_df = process_mating(mate_raw)
-genomic_df, trait_cols = process_genomic(genomic_raw)
+try:
+    genomic_df, trait_cols = process_genomic(genomic_raw)
+except Exception as _e:
+    # ゲノム情報ファイルの内容に想定外の問題があっても、アプリ全体がクラッシュして
+    # 使用不能にならないようにするための安全策。エラーはサイドバーに表示し、
+    # 他のデータ（授精記録・交配精液候補・育成牛リスト）は通常通り使えるようにする。
+    genomic_df, trait_cols = None, []
+    st.sidebar.error(
+        f"⚠️ ゲノム情報の読み込みでエラーが発生しました： {_e}\n\n"
+        "サイドバーの「③ ゲノム情報」からファイルを再アップロードし、保存し直してください。"
+    )
 herd_df = process_herd_list(herd_raw)
 
 cow_master, match_diag = build_cow_master(insem_df, mate_df, genomic_df, herd_df)
