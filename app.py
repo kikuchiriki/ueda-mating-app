@@ -122,6 +122,17 @@ def save_settings(d):
     _sb_ul("settings.json", json.dumps(d, ensure_ascii=False).encode("utf-8"), "application/json")
 
 
+def _parse_saved_date(s, fallback):
+    """settings.jsonに保存された日付文字列を安全にdateへ変換する。
+    形式が壊れていてもアプリ全体がクラッシュしないよう、失敗時はfallbackを返す。"""
+    if not s:
+        return fallback
+    try:
+        return date.fromisoformat(s)
+    except Exception:
+        return fallback
+
+
 # ══════════════════════════════════════════════════════════════════
 #  分類ロジック
 # ══════════════════════════════════════════════════════════════════
@@ -628,14 +639,17 @@ for lbl, ts in [("授精記録", insem_ts), ("交配精液候補", mate_ts), ("�
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("**交配精液候補の判定基準**")
-st.sidebar.caption("牛番号を検索し直しても、ここで設定した基準は保持されます。")
+st.sidebar.caption("ここで設定した基準は、データの更新やアプリの再起動後も保持されます（全端末で共有）。")
 if trait_cols:
+    _default_thresh_trait = _S.get("thresh_trait") if _S.get("thresh_trait") in trait_cols \
+        else ("TPI" if "TPI" in trait_cols else trait_cols[0])
     thresh_trait = st.sidebar.selectbox(
         "基準とする形質", trait_cols,
-        index=trait_cols.index("TPI") if "TPI" in trait_cols else 0,
+        index=trait_cols.index(_default_thresh_trait),
         key="trait_select_mating")
     thresh_val = st.sidebar.slider(
-        "牛群内順位の基準（この値以上で候補精液を提示）", 1, 100, 50, 1,
+        "牛群内順位の基準（この値以上で候補精液を提示）", 1, 100,
+        int(_S.get("thresh_val", 50)), 1,
         key="mating_threshold")
 else:
     thresh_trait, thresh_val = None, 50
@@ -647,9 +661,11 @@ st.sidebar.caption("DWP$・NM$・TPI以外に常に表示したい形質を複�
 ALWAYS_SHOW_TRAITS = ["DWP$", "NM$", "TPI"]
 if trait_cols:
     extra_trait_options = [t for t in trait_cols if t not in ALWAYS_SHOW_TRAITS]
+    _default_extra_fallback = ["乳量"] if "乳量" in extra_trait_options else []
+    _default_extra = [t for t in _S.get("extra_traits", _default_extra_fallback) if t in extra_trait_options]
     selected_extra_traits = st.sidebar.multiselect(
         "追加で表示する形質（複数選択可）", extra_trait_options,
-        default=["乳量"] if "乳量" in extra_trait_options else [],
+        default=_default_extra,
         key="trait_multiselect_extra")
 else:
     selected_extra_traits = []
@@ -799,15 +815,25 @@ with TABS[1]:
     fc1, fc2 = st.columns(2)
     min_d, max_d = df["_date"].min(), df["_date"].max()
     with fc1:
-        start_d = st.date_input("授精期間（開始）", value=min_d.date() if pd.notna(min_d) else date(2025, 1, 1))
+        start_d = st.date_input(
+            "授精期間（開始）",
+            value=_parse_saved_date(_S.get("start_d"), min_d.date() if pd.notna(min_d) else date(2025, 1, 1)),
+            key="insem_start_date")
     with fc2:
-        end_d = st.date_input("授精期間（終了）", value=max_d.date() if pd.notna(max_d) else date.today())
+        end_d = st.date_input(
+            "授精期間（終了）",
+            value=_parse_saved_date(_S.get("end_d"), max_d.date() if pd.notna(max_d) else date.today()),
+            key="insem_end_date")
 
     fc3, fc4 = st.columns(2)
     with fc3:
-        breed_sel = st.multiselect("品種", ["ホル", "F1", "和牛"], default=["ホル", "F1", "和牛"])
+        breed_sel = st.multiselect("品種", ["ホル", "F1", "和牛"],
+                                    default=_S.get("breed_sel", ["ホル", "F1", "和牛"]),
+                                    key="breed_multiselect")
     with fc4:
-        method_sel = st.multiselect("授精方法", ["授精", "移植", "追い移植"], default=["授精", "移植", "追い移植"])
+        method_sel = st.multiselect("授精方法", ["授精", "移植", "追い移植"],
+                                     default=_S.get("method_sel", ["授精", "移植", "追い移植"]),
+                                     key="method_multiselect")
 
     dp = df[(df["_date"].dt.date >= start_d) & (df["_date"].dt.date <= end_d)]
     dp = dp[dp["_breed_group"].isin(breed_sel)]
@@ -841,6 +867,23 @@ with TABS[1]:
                 grp.rename(columns={"Remark": "精液コード"}).style.format(
                     {"受胎率": "{:.1f}%", "授精頭数": "{:.0f}", "受胎頭数": "{:.0f}"}),
                 use_container_width=True)
+
+# サイドバー・分析条件で設定した値をSupabase（settings.json）に保存する。
+# こうしておくことで、データの更新・アプリの再起動・別端末からのアクセスでも
+# 最後に設定した値が復元される（以前はsession_stateのみに保持されており、
+# 新しいセッションが始まるたびに初期値へ戻ってしまっていた）。
+# 値が前回保存時と変わっていない場合は不要な保存処理を行わない。
+_new_settings = dict(_S)
+if trait_cols:
+    _new_settings["thresh_trait"] = thresh_trait
+    _new_settings["thresh_val"] = thresh_val
+    _new_settings["extra_traits"] = selected_extra_traits
+_new_settings["start_d"] = start_d.isoformat()
+_new_settings["end_d"] = end_d.isoformat()
+_new_settings["breed_sel"] = breed_sel
+_new_settings["method_sel"] = method_sel
+if _new_settings != _S:
+    save_settings(_new_settings)
 
 # ══════════════════════════════════════════════════════════════════
 #  TAB 3: データ確認（紐付け診断）
