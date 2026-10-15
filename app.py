@@ -442,7 +442,10 @@ def build_cow_master(insem_df, mate_df, genomic_df, herd_df=None):
       1. ゲノムID(短縮形 U+4桁) が牛番号と完全一致
       2. ゲノムID(長形 U+10桁) の 6〜9桁目 が牛番号(4桁)と完全一致
          （例：耳標 1398433135 の6〜9桁目「3313」= 牛番号3313）
-      3. 交配候補ファイルの耳標番号(10桁) の 6〜9桁目 が牛番号(4桁)と完全一致
+      3. 交配候補ファイルの牛識別子が牛番号と紐付く。識別子が10桁の耳標番号の場合は
+         その6〜9桁目を、WMS等の「雌牛管理番号」のようにすでに4桁前後の牛番号
+         そのもの（チェックデジットは取り除き済み）が入っている場合はその値を
+         そのまま用いる（extract_mate_farmid参照）。
     ※ 以前は「牛番号が耳標番号のどこかに部分文字列として含まれるか」という緩い判定を
       使っていたが、これは桁位置を問わない判定のため、無関係な個体の耳標にたまたま
       同じ数字の並びが含まれるケースで誤紐付けが発生しうる不具合があった。
@@ -456,6 +459,21 @@ def build_cow_master(insem_df, mate_df, genomic_df, herd_df=None):
     def digits_6to9(core):
         """10桁の耳標番号文字列から6〜9桁目(4桁)を取り出す。10桁でなければNoneを返す。"""
         return core[5:9] if len(core) == 10 else None
+
+    def extract_mate_farmid(eartag):
+        """交配精液候補ファイルの牛識別子からfarm_idを取り出す。
+        旧形式（10桁の耳標番号）の場合は従来通り6〜9桁目を抽出する。
+        新形式（WMS等の「雌牛管理番号」のように、牛番号そのもの（1〜5桁）が
+        入っている場合）はそのまま牛番号として扱う（チェックデジット等の
+        ハイフン以降は呼び出し側で既に取り除かれている前提）。"""
+        s = str(eartag).strip()
+        if not s.isdigit():
+            return None
+        if len(s) == 10:
+            return digits_6to9(s)
+        if 1 <= len(s) <= 5:
+            return s
+        return None
 
     genomic_short = {}
     genomic_long_by_farmid = {}
@@ -471,7 +489,7 @@ def build_cow_master(insem_df, mate_df, genomic_df, herd_df=None):
     mate_by_farmid = {}
     if mate_df is not None:
         for m in mate_df.itertuples(index=False):
-            key = digits_6to9(m.eartag)
+            key = extract_mate_farmid(m.eartag)
             if key:
                 mate_by_farmid[key] = m
 
